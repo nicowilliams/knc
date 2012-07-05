@@ -75,9 +75,9 @@ extern char _log_buff[2048];
 
 /* The rest of them are internal utility functions */
 
-static int	write_packet(int, gss_buffer_t);
-static int	read_packet(int, gss_buffer_t);
-static int	gstd_errstring(char **, OM_uint32, gss_OID, OM_uint32);
+static int		write_packet(int, gss_buffer_t);
+static int		read_packet(int, gss_buffer_t);
+static OM_uint32	gstd_errstring(char **, OM_uint32, gss_OID, OM_uint32);
 
 #define SETUP_GSTD_TOK(s,ctx,mech,fd,log) do {				\
 		(s) = malloc(sizeof(*(s)));				\
@@ -170,7 +170,7 @@ gstd_initiate(const char *hostname, const char *service, const char *princ,
 	gss_ctx_id_t	ctx = GSS_C_NO_CONTEXT;
 	gss_buffer_desc	in, out;
 	gss_OID		type;
-        /* XXXnico have desired_mech passed in */
+        /* XXXnico eventually have desired_mech passed in to us */
 	gss_OID		desired_mech = GSS_C_NO_OID;
 	gss_OID		actual_mech;
 	OM_uint32	maj, min;
@@ -490,72 +490,77 @@ writen(int fd, const void *buf, ssize_t len) {
 }
 
 
-static int
+static OM_uint32
 gstd_errstring(char **str, OM_uint32 maj, gss_OID mech, OM_uint32 min)
 {
 	gss_buffer_desc	 status;
+	OM_uint32	 code = maj;
 	OM_uint32	 new_stat;
 	OM_uint32	 msg_ctx = 0;
 	OM_uint32	 ret;
+	int		 codetype = GSS_C_GSS_CODE;
+	gss_OID		 oid = GSS_C_NO_OID;
 	int		 len = 0;
 	char		*tmp;
-	char		*statstr;
-
-	if (!str)
-		return -1;
+	char		*statstr = NULL;
+	size_t		 statstrlen = 0;
 
 	*str = NULL;
 	tmp = NULL;
 
-	do {
-		ret = gss_display_status(&new_stat, min,
-		    GSS_C_MECH_CODE, GSS_C_NO_OID, &msg_ctx,
-		    &status);
+	/*
+	 * It'd be nice to be able to use asprintf() here...  It'd also
+	 * be nice to have a more programmer-friendly gss_display_status()...
+	 *
+	 * The canonical usage of this function is: loop over calls to
+	 * gss_display_status(), first applied to 'maj' until there's no
+	 * more output, then again to 'min' until there's no more
+	 * output, accumulating the messages (or printing them, but we
+	 * want to log) as we go.
+	 */
 
-		/* GSSAPI strings are not NUL terminated */
-		if ((statstr = (char *)malloc(status.length + 1)) == NULL) {
+	do {
+		ret = gss_display_status(&new_stat, code, codetype, oid,
+					 &msg_ctx, &status);
+		if (GSS_ERROR(ret)) {
+		    free(statstr);
+		    return ret;
+		}
+
+		if ((tmp = realloc(statstr,
+				   statstrlen + status.length + 3)) == NULL) {
 			LOG(LOG_ERR, ("unable to malloc status string "
 				      "of length %ld", status.length));
 			gss_release_buffer(&new_stat, &status);
 			free(statstr);
-			free(tmp);
-			return 0;
+			return GSS_S_UNAVAILABLE;
 		}
+		statstr = tmp;
 
-		memcpy(statstr, status.value, status.length);
-		statstr[status.length] = '\0';
-
-		if (GSS_ERROR(ret)) {
-			free(statstr);
-			free(tmp);
-			break;
+		/* Join multiple display strings with "; " */
+		if (statstrlen) {
+		    statstr[statstrlen++] = ',';
+		    statstr[statstrlen++] = ' ';
 		}
-
-		if (*str) {
-			if ((*str = malloc(strlen(*str) + status.length +
-					   3)) == NULL) {
-				LOG(LOG_ERR, ("unable to malloc error "
-						"string"));
-				gss_release_buffer(&new_stat, &status);
-				free(statstr);
-				free(tmp);
-				return 0;
-			}
-
-			len = sprintf(*str, "%s, %s", tmp, statstr);
-		} else {
-			*str = malloc(status.length + 1);
-			len = sprintf(*str, "%s", (char *)statstr);
-		}
+		/* GSS-API strings are not NUL terminated */
+		memcpy(&statstr[statstrlen], status.value, status.length);
+		statstr[statstrlen + status.length] = '\0';
+		statstrlen += status.length;
 
 		gss_release_buffer(&new_stat, &status);
-		free(statstr);
-		free(tmp);
 
-		tmp = *str;
+		if (msg_ctx == 0 && codetype == GSS_C_GSS_CODE) {
+		    codetype = GSS_C_MECH_CODE;
+		    msg_ctx = 0;
+		    code = min;
+		    oid = mech;
+		    continue;
+		}
 	} while (msg_ctx != 0);
 
-	return len;
+	*str = statstr;
+
+	return GSS_S_COMPLETE;
 }
 
 /* XXXnico still need to make sure we pass a real mech OID to this */
@@ -564,12 +569,13 @@ gstd_error(int pri, OM_uint32 maj, gss_OID mech, OM_uint32 min, const char *s)
 {
 	char *t1;
 
-	if (gstd_errstring(&t1, maj, mech, min) < 1)
+	if (gstd_errstring(&t1, maj, mech, min) != GSS_S_COMPLETE) {
 		LOG(pri, ("%s: couldn't form GSSAPI error string", s));
-	else {
-		LOG(pri, ("%s: %s", s, t1));
-		free(t1);
+		return;
 	}
+
+	LOG(pri, ("%s: %s", s, t1));
+	free(t1);
 }
 
 void
