@@ -67,6 +67,7 @@
 struct gstd_tok {
 	gss_ctx_id_t	gstd_ctx;	/* current GSS Context */
 	gss_buffer_desc	gstd_inbuf;	/* outstanding read buffer */
+	gss_OID		gstd_mech;	/* mechanism OID */
 	int		gstd_inbufpos;	/* position in said buffer */
 	int		gstd_fd;	/* file descriptor for the stream */
 };
@@ -79,7 +80,7 @@ void	*gstd_initiate(const char *, const char *, const char *, int);
 
 void	 gstd_release_context(void *);
 
-void gstd_error(int, int, const char *);
+void gstd_error(int, OM_uint32, gss_OID, OM_uint32, const char *);
 
 int	 readn(int, void *, ssize_t);
 int	 writen(int, const void *, ssize_t);
@@ -88,10 +89,22 @@ int	 writen(int, const void *, ssize_t);
 
 /* mmm, macros. */
 
-#define GSTD_GSS_ERROR(x,y,z,w) do {					\
-		if (GSS_ERROR((x))) {					\
-			gstd_error(LOG_ERR, (y), (w));		\
-			return (z);					\
+/*
+ * Use this macro for checking gss_unwrap() (or, if we used it at all,
+ * gss_verify_mic()) major status.
+ */
+#define GSTD_GSS_STREAM_ERROR(maj,min,oid,ret,str) do {			\
+		if ((maj) != GSS_S_COMPLETE) {				\
+			gstd_error(LOG_ERR, (maj), (oid), (min), (str));\
+			return (ret);					\
+		}							\
+	} while (0)
+
+/* Use this macros for checking the result of all other GSS calls */
+#define GSTD_GSS_ERROR(maj,min,oid,ret,str) do {			\
+		if (GSS_ERROR((maj))) {					\
+			gstd_error(LOG_ERR, (maj), (oid), (min), (str));\
+			return (ret);					\
 		}							\
 	} while (0)
 

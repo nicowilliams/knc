@@ -77,33 +77,35 @@ extern char _log_buff[2048];
 
 static int	write_packet(int, gss_buffer_t);
 static int	read_packet(int, gss_buffer_t);
-static int	gstd_errstring(char **, int);
+static int	gstd_errstring(char **, OM_uint32, gss_OID, OM_uint32);
 
-#define SETUP_GSTD_TOK(x,y,z,w) do {					\
-		(x) = malloc(sizeof(*(x)));				\
-		if (!(x)) {						\
+#define SETUP_GSTD_TOK(s,ctx,mech,fd,log) do {				\
+		(s) = malloc(sizeof(*(s)));				\
+		if (!(s)) {						\
 			LOG(LOG_ERR, ("%s: could not malloc(3), %s",	\
-				      (w), strerror(errno)));		\
+				      (log), strerror(errno)));		\
 			return NULL;					\
 		}							\
-		(x)->gstd_ctx = (y);					\
-		(x)->gstd_inbuf.length = 0;				\
-		(x)->gstd_inbuf.value = NULL;				\
-		(x)->gstd_inbufpos = -1;				\
-		(x)->gstd_fd  = (z);					\
+		(s)->gstd_ctx = (ctx);					\
+		(s)->gstd_mech = (mech);				\
+		(s)->gstd_inbuf.length = 0;				\
+		(s)->gstd_inbuf.value = NULL;				\
+		(s)->gstd_inbufpos = -1;				\
+		(s)->gstd_fd  = (fd);					\
 	} while (0)
 
 #define FREE_NOTNULL(x)	if (x) free(x)
 
+static
 char *
-gstd_get_display_name(gss_name_t client) {
+gstd_get_display_name(gss_name_t client, gss_OID mech) {
 	OM_uint32	maj;
 	OM_uint32	min;
 	gss_buffer_desc	buf;
 	char		*ret;
 
 	maj = gss_display_name(&min, client, &buf, NULL);
-	GSTD_GSS_ERROR(maj, min, NULL, "gss_display_name");
+	GSTD_GSS_ERROR(maj, min, mech, NULL, "gss_display_name");
 
 	if ((ret = (char *)malloc(buf.length + 1)) == NULL) {
 		LOG(LOG_ERR, ("unable to malloc"));
@@ -127,7 +129,8 @@ gstd_accept(int fd, char **display_creds)
 	gss_ctx_id_t	 ctx = GSS_C_NO_CONTEXT;
 	gss_buffer_desc	 in, out;
 	OM_uint32	 maj, min;
-	int		ret;
+        gss_OID		 mech;
+	int		 ret;
 
 	out.length = 0;
 	in.length = 0;
@@ -139,7 +142,7 @@ again:
 		return NULL;
 
 	maj = gss_accept_sec_context(&min, &ctx, GSS_C_NO_CREDENTIAL,
-	    &in, GSS_C_NO_CHANNEL_BINDINGS, &client, NULL, &out, NULL,
+	    &in, GSS_C_NO_CHANNEL_BINDINGS, &client, &mech, &out, NULL,
 	    NULL, NULL);
 
 	if (out.length && write_packet(fd, &out)) {
@@ -147,14 +150,14 @@ again:
 		return NULL;
 	}
 
-	GSTD_GSS_ERROR(maj, min, NULL, "gss_accept_sec_context");
+	GSTD_GSS_ERROR(maj, min, mech, NULL, "gss_accept_sec_context");
 
 	if (maj & GSS_S_CONTINUE_NEEDED)
 		goto again;
 
-	*display_creds = gstd_get_display_name(client);
+	*display_creds = gstd_get_display_name(client, mech);
 	gss_release_name(&min, &client);
-	SETUP_GSTD_TOK(tok, ctx, fd, "gstd_accept");
+	SETUP_GSTD_TOK(tok, ctx, mech, fd, "gstd_accept");
 	return tok;
 }
 
@@ -167,6 +170,9 @@ gstd_initiate(const char *hostname, const char *service, const char *princ,
 	gss_ctx_id_t	ctx = GSS_C_NO_CONTEXT;
 	gss_buffer_desc	in, out;
 	gss_OID		type;
+        /* XXXnico have desired_mech passed in */
+	gss_OID		desired_mech = GSS_C_NO_OID;
+	gss_OID		actual_mech;
 	OM_uint32	maj, min;
 	gss_buffer_desc	name;
 	gss_name_t	server;
@@ -194,20 +200,23 @@ gstd_initiate(const char *hostname, const char *service, const char *princ,
 	}
 
 	maj = gss_import_name(&min, &name, type, &server);
-	GSTD_GSS_ERROR(maj, min, NULL, "gss_import_name");
+	GSTD_GSS_ERROR(maj, min, GSS_C_NO_OID, NULL, "gss_import_name");
 
 	in.length = 0;
 	out.length = 0;
 
 again:
 	maj = gss_init_sec_context(&min, GSS_C_NO_CREDENTIAL, &ctx, server,
-	    GSS_C_NO_OID, GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG, 0,
-	    GSS_C_NO_CHANNEL_BINDINGS, &in, NULL, &out, NULL, NULL);
+	    desired_mech, GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG, 0,
+	    GSS_C_NO_CHANNEL_BINDINGS, &in, &actual_mech, &out, NULL, NULL);
 
 	if (out.length && write_packet(fd, &out))
 		return NULL;
 
-	GSTD_GSS_ERROR(maj, min, NULL, "gss_init_sec_context");
+	GSTD_GSS_ERROR(maj, min,
+		       (actual_mech != GSS_C_NO_OID) ?
+			   actual_mech : desired_mech,
+		       NULL, "gss_init_sec_context");
 
 	if (GSS_ERROR(maj) && ctx != GSS_C_NO_CONTEXT) {
 		gss_delete_sec_context(&min, &ctx, GSS_C_NO_BUFFER);
@@ -228,7 +237,7 @@ again:
 	}
 
 	LOG(LOG_DEBUG, ("authenticated"));
-	SETUP_GSTD_TOK(tok, ctx, fd, "gstd_connect");
+	SETUP_GSTD_TOK(tok, ctx, actual_mech, fd, "gstd_connect");
 	return tok;
 }
 
@@ -264,10 +273,7 @@ gstd_read(void *the_tok, char *buf, int length)
 
 		maj = gss_unwrap(&min, tok->gstd_ctx, &in, &tok->gstd_inbuf,
 		    NULL, NULL);
-		if (maj != GSS_S_COMPLETE) {
-			gstd_error(LOG_ERR, min, "gss_unwrap");
-			return -1;
-		}
+		GSTD_GSS_STREAM_ERROR(maj, min, tok->gstd_mech, -1, "gss_unwrap");
 		gss_release_buffer(&min, &in);
 		bufpos = 0;
 	}
@@ -310,7 +316,7 @@ gstd_write(work_t *work)
 
 	maj = gss_wrap(&min, tok->gstd_ctx, 1, GSS_C_QOP_DEFAULT,
 	    &in, NULL, &out);
-	GSTD_GSS_ERROR(maj, min, -1, "gss_wrap");
+	GSTD_GSS_ERROR(maj, min, tok->gstd_mech, -1, "gss_wrap");
 
 	/* should I loop on this one? */
 	if (write_packet(tok->gstd_fd, &out))
@@ -485,7 +491,7 @@ writen(int fd, const void *buf, ssize_t len) {
 
 
 static int
-gstd_errstring(char **str, int min_stat)
+gstd_errstring(char **str, OM_uint32 maj, gss_OID mech, OM_uint32 min)
 {
 	gss_buffer_desc	 status;
 	OM_uint32	 new_stat;
@@ -495,9 +501,6 @@ gstd_errstring(char **str, int min_stat)
 	char		*tmp;
 	char		*statstr;
 
-	/* XXXrcd this is not correct yet */
-	/* XXXwps ...and now it is. */
-
 	if (!str)
 		return -1;
 
@@ -505,7 +508,7 @@ gstd_errstring(char **str, int min_stat)
 	tmp = NULL;
 
 	do {
-		ret = gss_display_status(&new_stat, min_stat,
+		ret = gss_display_status(&new_stat, min,
 		    GSS_C_MECH_CODE, GSS_C_NO_OID, &msg_ctx,
 		    &status);
 
@@ -555,12 +558,13 @@ gstd_errstring(char **str, int min_stat)
 	return len;
 }
 
+/* XXXnico still need to make sure we pass a real mech OID to this */
 void
-gstd_error(int pri, int min_stat, const char *s)
+gstd_error(int pri, OM_uint32 maj, gss_OID mech, OM_uint32 min, const char *s)
 {
 	char *t1;
 
-	if (gstd_errstring(&t1, min_stat) < 1)
+	if (gstd_errstring(&t1, maj, mech, min) < 1)
 		LOG(pri, ("%s: couldn't form GSSAPI error string", s));
 	else {
 		LOG(pri, ("%s: %s", s, t1));

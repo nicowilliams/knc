@@ -836,7 +836,7 @@ write_network_buffer(work_t *work) {
 
 		maj = gss_wrap(&min, tok->gstd_ctx, prefs.noprivacy?0:1,
 			       GSS_C_QOP_DEFAULT, &in, NULL, &out);
-		GSTD_GSS_ERROR(maj, min, -1, "gss_wrap");
+		GSTD_GSS_ERROR(maj, min, tok->gstd_mech, -1, "gss_wrap");
 
 		memcpy(&(work->network_buffer.out[4]), out.value, out.length);
 		packet_len = htonl(out.length);
