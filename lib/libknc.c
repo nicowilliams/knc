@@ -74,7 +74,7 @@ struct knc_stream {
 	struct knc_stream_gc	*garbage;
 	size_t			 bufpos;
 	size_t			 avail;
-	char			*failed_func;
+	const char		*failed_func;
 	int			 errnum;
 };
 
@@ -2511,7 +2511,7 @@ knc_syscall_error(knc_ctx ctx, const char *str, int number)
 }
 
 static void
-knc_nomem(knc_ctx ctx)
+knc_enomem(knc_ctx ctx)
 {
     knc_syscall_error(ctx, "Out of memory", ENOMEM);
 }
@@ -2535,11 +2535,4 @@ knc_gss_error(knc_ctx ctx, OM_uint32 maj_stat, OM_uint32 min_stat,
 	if (!ctx->errstr)
 		ctx->errstr = strdup("Failed to construct GSS error");
 	KNCDEBUG(ctx, ("knc_gss_error: %s\n", ctx->errstr));
-}
-
-static void
-knc_enomem(knc_ctx ctx)
-{
-
-	knc_syscall_error(ctx, "Out of memory", ENOMEM);
 }
