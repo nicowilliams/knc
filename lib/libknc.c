@@ -60,6 +60,10 @@
 #include "libknc.h"
 #include "private.h"
 
+#define oom_gss_msg "No memory while constructing GSS error message"
+#define gen_gss_msg "Failed to construct GSS error"
+#define bad_gss_msg "GSS doesn't recognize its own errors!"
+
 struct stream_bit {
 	int			  type;
 #define	STREAM_BUFFER	0x1
@@ -964,7 +968,9 @@ knc_ctx_destroy(knc_ctx ctx)
 	/* XXXrcd: memory leaks?  */
 	/* XXXnico: smartass comment: use valgrind */
 
-	free(ctx->errstr);
+	if (ctx->errstr != oom_gss_msg && ctx->errstr != gen_gss_msg &&
+	    ctx->errstr != bad_gss_msg)
+		free(ctx->errstr);
 
 	destroy_stream(&ctx->raw_recv);
 	destroy_stream(&ctx->cooked_recv);
@@ -2814,7 +2820,7 @@ knc_errstring(OM_uint32 maj_stat, OM_uint32 min_stat, const char *preamble)
 	cur_stat = maj_stat;
 	type = GSS_C_GSS_CODE;
 
-	for (;;) {
+	for (ret = GSS_S_COMPLETE; ret == GSS_S_COMPLETE;) {
 
 		/*
 		 * GSS_S_FAILURE produces a rather unhelpful message, so
@@ -2829,13 +2835,18 @@ knc_errstring(OM_uint32 maj_stat, OM_uint32 min_stat, const char *preamble)
 		ret = gss_display_status(&new_stat, cur_stat, type,
 		    GSS_C_NO_OID, &msg_ctx, &status);
 
-		if (GSS_ERROR(ret))
-			return str;	/* XXXrcd: hmmm, not quite?? */
-
 		if (str)
 			newlen = strlen(str);
 		else
 			newlen = strlen(preamble);
+
+		if (GSS_ERROR(ret)) {
+			if (ret == GSS_S_FAILURE)
+				newlen += strlen(gen_gss_msg);
+			else
+				newlen += strlen(bad_gss_msg); /* wat */
+			newlen += sizeof("; ") - 1;
+		}
 
 		newlen += status.length + 3;
 
@@ -2843,14 +2854,23 @@ knc_errstring(OM_uint32 maj_stat, OM_uint32 min_stat, const char *preamble)
 		str = malloc(newlen);
 
 		if (!str) {
+			free(tmp);
 			gss_release_buffer(&new_stat, &status);
-			return tmp;	/* XXXrcd: hmmm, not quite?? */
+			return oom_gss_msg;
 		}
 
-		snprintf(str, newlen, "%s%s%.*s", tmp?tmp:preamble,
-		    tmp?", ":": ", (int)status.length, (char *)status.value);
+		if (GSS_ERROR(ret)) {
+			snprintf(str, newlen, "%s; %s%s",
+			    (ret == GSS_S_FAILURE)?gen_gss_msg:bad_gss_msg,
+			    tmp?tmp:preamble, tmp?", ":": ");
+		} else {
+			snprintf(str, newlen, "%s%s%.*s", tmp?tmp:preamble,
+			    tmp?", ":": ", (int)status.length,
+			    (char *)status.value);
+		}
 
-		gss_release_buffer(&new_stat, &status);
+		if (!GSS_ERROR(ret))
+			gss_release_buffer(&new_stat, &status);
 		free(tmp);
 
 		/*
