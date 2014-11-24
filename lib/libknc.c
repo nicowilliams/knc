@@ -146,6 +146,8 @@ struct internal_knc_ctx {
 	size_t			 sendmax;	/* XXXrcd: hmmm */
 	size_t			 gssmaxpacket;
 
+	int			 unwrapped_one; /* for async errors */
+
 	struct stream		 raw_recv;
 	struct stream		 cooked_recv;
 	struct stream		 raw_send;
@@ -1422,6 +1424,8 @@ knc_state_session(knc_ctx ctx, void *buf, size_t len)
 	gss_buffer_desc	out;
 	OM_uint32	maj;
 	OM_uint32	min;
+	OM_uint32	maj2;
+	OM_uint32	min2;
 
 	in.value  = buf;
 	in.length = len;
@@ -1430,6 +1434,33 @@ knc_state_session(knc_ctx ctx, void *buf, size_t len)
 
 	KNCDEBUG((ctx, "knc_state_session: enter\n"));
 	maj = gss_unwrap(&min, ctx->gssctx, &in, &out, NULL, NULL);
+
+	/* Handle async error context token case */
+	if (!ctx->unwrapped_one &&
+	    (maj == GSS_S_DEFECTIVE_TOKEN || maj == GSS_S_BAD_SIG)) {
+		maj2 = gss_process_context_token(&min2, ctx->gssctx, &in);
+		if (maj2 == GSS_S_COMPLETE || maj2 == GSS_S_FAILURE) {
+			knc_gss_error(ctx, GSS_S_COMPLETE, min2,
+				      "gss_process_context_token");
+		}
+#ifndef HAVE_GOOD_PROCESS_CONTEXT_TOKEN
+		/*
+		 * Some implementations of gss_process_context_token()
+		 * incorrectly delete the security context when a
+		 * context deletion token is used, leading to
+		 * double-frees here.  We have no way to detect this at
+		 * runtime.  We can't depend on build-time detection of
+		 * this either.  Therefore we default to leaking the
+		 * context in the worst case instead of dangling
+		 * dereference and/or double-free in the worst case.
+		 */
+		if (maj2 == GSS_S_COMPLETE &&
+		    (ctx->opts & KNC_OPT_PROC_CTX_TOK_WORKS) == 0)
+			ctx->gssctx = GSS_C_NO_CONTEXT;
+#endif
+	}
+
+	ctx->unwrapped_one = 1;
 
 	if (maj != GSS_S_COMPLETE) {
 		knc_gss_error(ctx, maj, min, "gss_unwrap");
@@ -2931,11 +2962,15 @@ void
 knc_gss_error(knc_ctx ctx, OM_uint32 maj_stat, OM_uint32 min_stat,
 	      const char *s)
 {
-
 	ctx->error = KNC_ERROR_GSS;
-	ctx->errstr = knc_errstring(maj_stat, min_stat, s);
-	if (!ctx->errstr)
-		ctx->errstr = strdup("Failed to construct GSS error");
+
+	if (strcmp(s, "gss_process_context_token") == 0 &&
+	    maj_stat == GSS_S_COMPLETE) {
+		ctx->errstr = strdup("Connection securely closed by peer");
+	} else {
+		ctx->errstr = knc_errstring(maj_stat, min_stat, s);
+		assert( ctx->errstr != NULL );
+	}
 	KNCDEBUG((ctx, "knc_gss_error: %s\n", ctx->errstr));
 }
 
